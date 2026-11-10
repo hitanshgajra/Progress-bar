@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="js-widget-title" content="Daily Dots">
+<title>Daily Dots</title>
+<style>
+/* One square: a 10 x 10 block of day dots and a caption. The whole square is a single link that checks in today. */
+:root {
+  --card: #0a0a0b;
+  --fg: #f2f2f3;
+  --muted: #8a8a8f;
+  --dot-future: #2a2a2c;
+  --dot-done: #ffffff;
+  --dot-miss: #48484c;
+  --dot-today: #9b9b9f;
+  --wweb2-overlay-btn-color: transparent;
+  --wweb2-overlay-btn-press-color: rgba(255,255,255,0.08);
+  --wweb2-overlay-btn-corner-radius: 0px;
+  --wweb2-overlay-btn-padding: 0px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: #000; color: var(--fg);
+  font-family: -apple-system, "SF Pro Text", system-ui, "Segoe UI", sans-serif; -webkit-text-size-adjust: 100%; }
+body { display: grid; place-items: center; overflow: hidden; }
+a { color: inherit; text-decoration: none; -webkit-tap-highlight-color: transparent; }
+
+.card {
+  --u: min(100vw, 100vh);
+  width: var(--u); height: var(--u);
+  background: var(--card);
+  border-radius: calc(var(--u) * 0.11);
+  padding: calc(var(--u) * 0.07) calc(var(--u) * 0.07) calc(var(--u) * 0.045);
+  display: flex; flex-direction: column; gap: calc(var(--u) * 0.03);
+}
+.tap { display: flex; flex: 1 1 0; min-height: 0; align-items: center; justify-content: center; }
+.grid {
+  --cols: 10; --rows: 10;
+  width: min(calc(var(--u) * 0.86), calc(var(--u) * 0.76 * var(--cols) / var(--rows)));
+  aspect-ratio: var(--cols) / var(--rows);
+  display: grid;
+  grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+  gap: calc(var(--u) * 0.018);
+}
+.dot { border-radius: 50%; background: var(--dot-future); }
+.dot.on { background: var(--dot-done); }
+.dot.miss { background: transparent; box-shadow: inset 0 0 0 1.5px var(--dot-miss); }
+.dot.pending { background: var(--dot-today); }
+.dot.now { box-shadow: 0 0 0 1px var(--card), 0 0 0 2px #fff; }
+.foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: calc(var(--u) * 0.07); }
+.caption { font-size: calc(var(--u) * 0.04); letter-spacing: 0.03em; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.undo { font-size: calc(var(--u) * 0.036); color: var(--muted); padding: calc(var(--u) * 0.012) calc(var(--u) * 0.02); border-radius: 6px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <a class="tap" id="tap" href="#action=checkin" aria-label="Check in for today">
+    <div class="grid" id="grid"></div>
+  </a>
+  <div class="foot">
+    <span class="caption" id="caption"></span>
+    <a class="undo" id="undo" href="#action=undo">undo</a>
+  </div>
+</div>
+
+<script>
+(function () {
+  // Goal defaults. Change them here, or send them once with
+  //   #action=setup&start=2026-11-10&total=365
+  // They are then remembered in a cookie.
+  var DEFAULTS = { start: "2026-11-10", total: 365, done: ["2026-11-10"] };
+  var WIN = 100, DAY = 86400000;
+  var CFG = "dd_cfg", BITS = "dd_bits";
+
+  // Widget title for the app (also set by the meta tag above).
+  window.__wweb2JsWidgetTitle = function () { return "Daily Dots"; };
+  // Ready as soon as the page has drawn, so taps respond quickly.
+  window.__wweb2WaitMillisecondsToWidgetIsReady = function () { return 0; };
+
+  function log(m) { try { if (window.__wweb2Log) window.__wweb2Log(m); } catch (e) {} }
+  function pad(n) { return String(n).padStart(2, "0"); }
+  function keyOf(d) { return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()); }
+  function utc(k) { var p = k.split("-").map(Number); return Date.UTC(p[0], p[1] - 1, p[2]); }
+  function addDays(k, n) {
+    var t = new Date(utc(k) + n * DAY);
+    return t.getUTCFullYear() + "-" + pad(t.getUTCMonth() + 1) + "-" + pad(t.getUTCDate());
+  }
+  function today() { return keyOf(new Date()); }
+  var DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+  // Storage: cookies first (the app shares them between taps), localStorage as a backup.
+  function getCookie(n) {
+    var m = document.cookie.match(new RegExp("(?:^|; )" + n + "=([^;]*)"));
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+  function setCookie(n, v) {
+    document.cookie = n + "=" + encodeURIComponent(v) + "; max-age=" + (400 * 86400) + "; path=/; SameSite=Lax";
+  }
+  function read(n) {
+    var v = getCookie(n);
+    if (v === null) { try { v = localStorage.getItem(n); } catch (e) {} }
+    return v;
+  }
+  function write(n, v) {
+    setCookie(n, v);
+    try { localStorage.setItem(n, v); } catch (e) {}
+  }
+
+  function bitsToB64(bits) {
+    var bytes = new Array(Math.ceil(bits.length / 8)).fill(0);
+    for (var i = 0; i < bits.length; i++) if (bits[i]) bytes[i >> 3] |= 1 << (i & 7);
+    return btoa(String.fromCharCode.apply(null, bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function b64ToBits(s, n) {
+    var bits = new Array(n).fill(false);
+    try {
+      var bin = atob(s.replace(/-/g, "+").replace(/_/g, "/"));
+      for (var i = 0; i < n && (i >> 3) < bin.length; i++) bits[i] = !!(bin.charCodeAt(i >> 3) & (1 << (i & 7)));
+    } catch (e) {}
+    return bits;
+  }
+
+  var st = { start: DEFAULTS.start, total: DEFAULTS.total, bits: null };
+  (function load() {
+    var cfg = read(CFG);
+    if (cfg) {
+      var p = cfg.split("|");
+      if (DATE_RE.test(p[0]) && +p[1] >= 1 && +p[1] <= 1000) { st.start = p[0]; st.total = Math.round(+p[1]); }
+    }
+    var b = read(BITS);
+    if (b) {
+      st.bits = b64ToBits(b, st.total);
+    } else {
+      st.bits = new Array(st.total).fill(false);
+      DEFAULTS.done.forEach(function (k) { var i = idxOf(k); if (i >= 0 && i < st.total) st.bits[i] = true; });
+    }
+  })();
+  function idxOf(k) { return Math.round((utc(k) - utc(st.start)) / DAY); }
+  function persist() { write(CFG, st.start + "|" + st.total); write(BITS, bitsToB64(st.bits)); }
+
+  function act(name, params) {
+    var i = idxOf(today());
+    if (name === "checkin") {
+      if (i >= 0 && i < st.total) { st.bits[i] = true; persist(); }
+    } else if (name === "undo") {
+      if (i >= 0 && i < st.total) { st.bits[i] = false; persist(); }
+    } else if (name === "setup") {
+      var s = params.get("start"), t = Math.round(Number(params.get("total")));
+      if (s && DATE_RE.test(s) && t >= 1 && t <= 1000) {
+        st.start = s; st.total = t; st.bits = new Array(t).fill(false); persist();
+      }
+    }
+    log("action " + name);
+  }
+
+  var grid = document.getElementById("grid");
+  function render() {
+    var t = today(), idx = idxOf(t) + 1, tot = st.total;
+    var blocks = Math.ceil(tot / WIN);
+    var blk = Math.min(Math.max(Math.floor((idx - 1) / WIN), 0), blocks - 1);
+    var from = blk * WIN, to = Math.min(tot, from + WIN), win = to - from;
+    var cols = Math.ceil(Math.sqrt(Math.min(WIN, tot)));
+    var rows = Math.ceil(Math.min(WIN, tot) / cols);
+    grid.style.setProperty("--cols", cols);
+    grid.style.setProperty("--rows", rows);
+    var html = "";
+    for (var i = from; i < to; i++) {
+      var k = addDays(st.start, i), cls = "dot";
+      if (k > t) { /* future */ }
+      else if (st.bits[i]) cls += " on";
+      else if (k === t) cls += " pending";
+      else cls += " miss";
+      if (k === t) cls += " now";
+      html += '<div class="' + cls + '"></div>';
+    }
+    grid.innerHTML = html;
+    var elapsed = Math.min(Math.max(idx, 0), tot);
+    document.getElementById("caption").textContent =
+      (tot - elapsed) + "d left · " + Math.round(elapsed / tot * 100) + "%";
+  }
+
+  function fromHash() {
+    var h = (location.hash || "").replace(/^#/, "");
+    if (!h) return;
+    var p = new URLSearchParams(h);
+    var a = p.get("action");
+    if (a) act(a, p);
+    try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+  }
+
+  // The app reloads this page with the link's #action=... on every tap; a normal browser runs it from the click.
+  fromHash();
+  render();
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest("a[href^='#action=']");
+    if (!a) return;
+    e.preventDefault();
+    var p = new URLSearchParams(a.getAttribute("href").slice(1));
+    act(p.get("action"), p);
+    render();
+  });
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) render(); });
+})();
+</script>
+</body>
+</html>
